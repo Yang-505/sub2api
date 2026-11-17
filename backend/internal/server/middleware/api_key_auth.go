@@ -133,6 +133,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			apiKey.Status != service.StatusAPIKeyExpired &&
 			apiKey.Status != service.StatusAPIKeyQuotaExhausted {
 			MarkIngressRejected(c, IngressRejectAPIKeyDisabled)
+			recordInvalidAuthFailure(c, apiKeyService)
 			AbortWithError(c, 401, "API_KEY_DISABLED", "API key is disabled")
 			return
 		}
@@ -161,6 +162,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 
 		// 检查用户状态
 		if !apiKey.User.IsActive() {
+			recordInvalidAuthFailure(c, apiKeyService)
 			MarkIngressRejected(c, IngressRejectUserInactive)
 			AbortWithError(c, 401, "USER_INACTIVE", "User account is not active")
 			return

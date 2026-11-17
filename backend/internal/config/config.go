@@ -803,16 +803,31 @@ type ForwardedClientIPSettings struct {
 }
 
 type SecurityConfig struct {
+	AuthAbuse       AuthAbuseConfig      `mapstructure:"auth_abuse"`
 	URLAllowlist    URLAllowlistConfig   `mapstructure:"url_allowlist"`
 	ResponseHeaders ResponseHeaderConfig `mapstructure:"response_headers"`
 	CSP             CSPConfig            `mapstructure:"csp"`
 	ProxyFallback   ProxyFallbackConfig  `mapstructure:"proxy_fallback"`
 	ProxyProbe      ProxyProbeConfig     `mapstructure:"proxy_probe"`
-	// TrustForwardedIPForAPIKeyACL enables legacy raw forwarded-header takeover.
-	// When disabled, server.trusted_proxies is authoritative for all client-IP consumers.
+	// TrustForwardedIPForAPIKeyACL enables custom/CDN client-IP headers from trusted proxies.
+	// 两种模式均依赖 server.trusted_proxies；关闭后仅采用标准 XFF/X-Real-IP 代理链。
 	TrustForwardedIPForAPIKeyACL  bool                                       `mapstructure:"trust_forwarded_ip_for_api_key_acl"`
 	ForwardedClientIPHeaders      []string                                   `mapstructure:"forwarded_client_ip_headers" json:"forwarded_client_ip_headers" yaml:"forwarded_client_ip_headers"`
 	forwardedClientIPSettingsLive *atomic.Pointer[ForwardedClientIPSettings] `mapstructure:"-" json:"-" yaml:"-"`
+}
+
+// AuthAbuseConfig 配置跨账号的持续认证失败防护；自动封禁需确认真实 IP 后显式启用。
+type AuthAbuseConfig struct {
+	DetectionEnabled    bool     `mapstructure:"detection_enabled" json:"detection_enabled"`
+	Enabled             bool     `mapstructure:"enabled" json:"enabled"`
+	ShortWindowSeconds  int      `mapstructure:"short_window_seconds" json:"short_window_seconds"`
+	ShortThreshold      int      `mapstructure:"short_threshold" json:"short_threshold"`
+	LongWindowSeconds   int      `mapstructure:"long_window_seconds" json:"long_window_seconds"`
+	LongThreshold       int      `mapstructure:"long_threshold" json:"long_threshold"`
+	InitialBlockSeconds int      `mapstructure:"initial_block_seconds" json:"initial_block_seconds"`
+	RepeatBlockSeconds  int      `mapstructure:"repeat_block_seconds" json:"repeat_block_seconds"`
+	PermanentAfter      int      `mapstructure:"permanent_after" json:"permanent_after"`
+	Whitelist           []string `mapstructure:"whitelist" json:"-"`
 }
 
 func NormalizeForwardedClientIPHeaders(headers []string) ([]string, error) {
@@ -867,8 +882,8 @@ func (c *Config) TrustForwardedIPForAPIKeyACL() bool {
 	return c.ForwardedClientIPSettings().TrustForwardedIP
 }
 
-// ForwardedClientIPTrustEnabled reports whether the legacy forwarded-header
-// compatibility mode currently overrides server.trusted_proxies.
+// ForwardedClientIPTrustEnabled reports whether custom/CDN client-IP headers are enabled.
+// 此开关不会覆盖 server.trusted_proxies 的信任边界。
 func (c *Config) ForwardedClientIPTrustEnabled() bool {
 	return c != nil && c.TrustForwardedIPForAPIKeyACL()
 }
@@ -2213,6 +2228,16 @@ func setDefaults() {
 	viper.SetDefault("security.csp.policy", DefaultCSPPolicy)
 	viper.SetDefault("security.proxy_probe.insecure_skip_verify", false)
 	viper.SetDefault("security.trust_forwarded_ip_for_api_key_acl", true)
+	viper.SetDefault("security.auth_abuse.enabled", false)
+	viper.SetDefault("security.auth_abuse.detection_enabled", true)
+	viper.SetDefault("security.auth_abuse.short_window_seconds", 900)
+	viper.SetDefault("security.auth_abuse.short_threshold", 10)
+	viper.SetDefault("security.auth_abuse.long_window_seconds", 86400)
+	viper.SetDefault("security.auth_abuse.long_threshold", 30)
+	viper.SetDefault("security.auth_abuse.initial_block_seconds", 1800)
+	viper.SetDefault("security.auth_abuse.repeat_block_seconds", 86400)
+	viper.SetDefault("security.auth_abuse.permanent_after", 0)
+	viper.SetDefault("security.auth_abuse.whitelist", []string{})
 
 	// Security - disable direct fallback on proxy error
 	viper.SetDefault("security.proxy_fallback.allow_direct_on_error", false)
@@ -2814,6 +2839,20 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	abuse := c.Security.AuthAbuse
+	if (abuse.Enabled || abuse.DetectionEnabled) && (abuse.ShortThreshold < 3 || abuse.LongThreshold < abuse.ShortThreshold || abuse.LongThreshold > 10000 ||
+		abuse.ShortWindowSeconds < 60 || abuse.LongWindowSeconds < abuse.ShortWindowSeconds || abuse.LongWindowSeconds > 604800 ||
+		abuse.InitialBlockSeconds < 60 || abuse.RepeatBlockSeconds < abuse.InitialBlockSeconds || abuse.RepeatBlockSeconds > 2592000 ||
+		(abuse.PermanentAfter != 0 && abuse.PermanentAfter < 2)) {
+		return fmt.Errorf("security.auth_abuse: invalid thresholds, windows or block durations")
+	}
+	for _, pattern := range abuse.Whitelist {
+		if addr, err := netip.ParseAddr(strings.TrimSpace(pattern)); err != nil || addr.Zone() != "" {
+			if _, err := netip.ParsePrefix(strings.TrimSpace(pattern)); err != nil {
+				return fmt.Errorf("security.auth_abuse.whitelist: invalid IP or CIDR %q", pattern)
+			}
+		}
+	}
 	if c.Gateway.MinOutputTokens < 16 {
 		return fmt.Errorf("gateway.min_output_tokens must be at least 16")
 	}

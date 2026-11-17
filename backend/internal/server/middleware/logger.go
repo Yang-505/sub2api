@@ -32,7 +32,7 @@ func Logger() gin.HandlerFunc {
 
 		method := c.Request.Method
 		statusCode := c.Writer.Status()
-		clientIP := ip.GetClientIP(c)
+		clientIP := ip.GetClientIPResolution(c)
 		protocol := c.Request.Proto
 		accountID, hasAccountID := c.Request.Context().Value(ctxkey.AccountID).(int64)
 		platform, _ := c.Request.Context().Value(ctxkey.Platform).(string)
@@ -57,7 +57,9 @@ func Logger() gin.HandlerFunc {
 			zap.String("component", "http.access"),
 			zap.Int("status_code", statusCode),
 			zap.Int64("latency_ms", latency.Milliseconds()),
-			zap.String("client_ip", clientIP),
+			zap.String("client_ip", clientIP.ClientIP),
+			zap.String("peer_ip", clientIP.PeerIP),
+			zap.String("client_ip_source", clientIP.Source),
 			zap.String("protocol", protocol),
 			zap.String("method", method),
 			zap.String("path", path),

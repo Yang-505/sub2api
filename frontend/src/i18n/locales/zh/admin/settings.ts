@@ -318,11 +318,11 @@ export default {
         description: '控制 API Key 白/黑名单、操作审计日志与会话 IP/UA 绑定使用哪个客户端 IP 判断',
         trustForwardedIp: '信任反代传递的客户端 IP',
         trustForwardedIpHint:
-          '为保证升级兼容默认开启。开启后 CF-Connecting-IP、X-Real-IP 或 X-Forwarded-For 会直接接管客户端 IP 解析并覆盖 server.trusted_proxies；关闭后严格使用 server.trusted_proxies 配置的 Gin 可信代理链。仅在源站无法被直接访问时开启接管模式。切换会改变现有会话的 IP 指纹。',
+          '开启后可使用可信代理传递的 CF 和自定义客户端 IP 请求头；关闭后仅使用标准代理链。两种模式都必须在服务端配置 server.trusted_proxies，未配置时使用连接对端 IP。代理必须覆盖客户端伪造的请求头。调整解析规则可能需要重新登录。',
         forwardedClientIpHeaders: '自定义客户端 IP 请求头',
-        forwardedClientIpHeadersHint: '添加 CDN 或反代请求头名称，解析时优先于内置请求头。',
+        forwardedClientIpHeadersHint: '开启上方选项后，来自可信代理的这些请求头优先于内置请求头；多个 IP 按代理链从右侧解析。',
         forwardedClientIpHeadersPlaceholder: 'X-Client-IP',
-        forwardedClientIpHeadersRiskHint: '源站可被直接访问时，这些原始请求头可被伪造；请先限制源站访问再信任它们。',
+        forwardedClientIpHeadersRiskHint: '只信任实际代理的精确 IP 或网段，避免信任全部来源。使用 CF 时，源站应限制为 CF 可访问，反代必须清除或覆盖非 CF 请求携带的 CF 请求头。',
         forwardedClientIpHeaderInvalid: '请输入有效的 HTTP 请求头名称。',
         forwardedClientIpHeadersLimit: '自定义客户端 IP 请求头最多允许 {max} 个。',
         removeForwardedClientIpHeader: '移除 {header}'

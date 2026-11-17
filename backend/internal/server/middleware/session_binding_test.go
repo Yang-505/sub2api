@@ -24,16 +24,24 @@ func TestSessionBindingContextFollowsForwardedIPSwitch(t *testing.T) {
 		trustedProxies []string
 		wantIP         string
 	}{
-		{name: "enabled switch takes over raw headers", trustForwarded: true, wantIP: "1.2.3.4"},
+		{name: "enabled switch rejects untrusted headers", trustForwarded: true, wantIP: "127.0.0.1"},
+		{name: "enabled switch uses configured proxy", trustForwarded: true, trustedProxies: []string{"127.0.0.1"}, wantIP: "1.2.3.4"},
 		{name: "disabled switch ignores untrusted headers", trustForwarded: false, wantIP: "127.0.0.1"},
 		{name: "disabled switch uses configured Gin proxy", trustForwarded: false, trustedProxies: []string{"127.0.0.1"}, wantIP: "1.2.3.4"},
+		{name: "invalid policy disables all trust", trustForwarded: true, trustedProxies: []string{"127.0.0.1", "not-a-proxy"}, wantIP: "127.0.0.1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
+			cfg.Server.TrustedProxies = tc.trustedProxies
+			cfg.Server.TrustedProxiesConfigured = len(tc.trustedProxies) > 0
 			cfg.SetTrustForwardedIPForAPIKeyACL(tc.trustForwarded)
 
 			r := gin.New()
-			require.NoError(t, r.SetTrustedProxies(tc.trustedProxies))
+			if len(ip.ValidateIPPatterns(tc.trustedProxies)) == 0 {
+				require.NoError(t, r.SetTrustedProxies(tc.trustedProxies))
+			} else {
+				require.NoError(t, r.SetTrustedProxies(nil))
+			}
 			r.Use(SessionBindingContext(cfg))
 			r.GET("/t", func(c *gin.Context) {
 				binding := service.SessionBindingFromContext(c.Request.Context())
@@ -60,6 +68,8 @@ func TestSessionBindingContextSnapshotsForwardedModeAndHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{}
+	cfg.Server.TrustedProxies = []string{"9.9.9.9"}
+	cfg.Server.TrustedProxiesConfigured = true
 	cfg.SetForwardedClientIPSettings(true, []string{"X-Initial-IP"})
 
 	r := gin.New()
@@ -71,7 +81,9 @@ func TestSessionBindingContextSnapshotsForwardedModeAndHeaders(t *testing.T) {
 		require.Equal(t, "1.2.3.4", binding.IP)
 
 		cfg.SetForwardedClientIPSettings(false, []string{"X-Changed-IP"})
+		c.Request.Header.Set("X-Initial-IP", "8.8.8.8")
 		require.Equal(t, "1.2.3.4", ip.GetSecurityClientIP(c, false))
+		require.Equal(t, "1.2.3.4", ip.GetClientIP(c))
 		c.Status(200)
 	})
 
@@ -131,6 +143,8 @@ func TestRequestSessionBindingPrefersInjectedBinding(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{}
+	cfg.Server.TrustedProxies = []string{"127.0.0.1"}
+	cfg.Server.TrustedProxiesConfigured = true
 	cfg.SetTrustForwardedIPForAPIKeyACL(true)
 
 	r := gin.New()

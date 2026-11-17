@@ -43,6 +43,8 @@ func ProvideRouter(
 	settingService *service.SettingService,
 	compositeResolver *service.CompositeRouteResolver,
 	redisClient *redis.Client,
+	authAbuseService *service.AuthAbuseService,
+	auditLogService *service.AuditLogService,
 ) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -88,7 +90,7 @@ func ProvideRouter(
 		service.SetWebSearchManager(websearch.NewManager(configs, redisClient))
 	})
 
-	return SetupRouter(r, handlers, jwtAuth, optionalJWTAuth, adminAuth, apiKeyAuth, auditLog, stepUpAuth, apiKeyService, subscriptionService, opsService, settingService, compositeResolver, cfg, redisClient)
+	return SetupRouter(r, handlers, jwtAuth, optionalJWTAuth, adminAuth, apiKeyAuth, auditLog, stepUpAuth, apiKeyService, subscriptionService, opsService, settingService, compositeResolver, cfg, redisClient, authAbuseService, auditLogService)
 }
 
 func configureTrustedProxies(r *gin.Engine, cfg config.ServerConfig) {
@@ -105,7 +107,7 @@ func configureTrustedProxies(r *gin.Engine, cfg config.ServerConfig) {
 			log.Printf("Failed to disable trusted proxies: %v", err)
 		}
 		if cfg.Mode == "release" {
-			log.Printf("Warning: server.trusted_proxies is not configured; disabling the forwarded-IP compatibility switch will use direct peer addresses only")
+			log.Printf("Warning: server.trusted_proxies is not configured; all forwarded client IP headers are ignored. Configure the exact proxy IP/CIDR and ensure it sanitizes client IP headers before enabling CDN header support")
 		}
 	}
 }

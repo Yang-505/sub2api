@@ -16,15 +16,17 @@ import (
 // AuditLogHandler 操作审计日志管理接口。
 // 审计日志仅管理员可见；不提供单条删除，仅支持带 TOTP 验证的全量清空。
 type AuditLogHandler struct {
-	auditService *service.AuditLogService
-	totpService  *service.TotpService
+	auditService     *service.AuditLogService
+	totpService      *service.TotpService
+	authAbuseService *service.AuthAbuseService
 }
 
 // NewAuditLogHandler 创建审计日志处理器。
-func NewAuditLogHandler(auditService *service.AuditLogService, totpService *service.TotpService) *AuditLogHandler {
+func NewAuditLogHandler(auditService *service.AuditLogService, totpService *service.TotpService, authAbuseService *service.AuthAbuseService) *AuditLogHandler {
 	return &AuditLogHandler{
-		auditService: auditService,
-		totpService:  totpService,
+		auditService:     auditService,
+		totpService:      totpService,
+		authAbuseService: authAbuseService,
 	}
 }
 

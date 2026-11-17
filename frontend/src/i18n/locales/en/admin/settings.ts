@@ -319,11 +319,11 @@ export default {
           'Choose which client IP is used by API Key allowlists/denylists, admin audit logs, and session IP/UA binding',
         trustForwardedIp: 'Trust forwarded client IP',
         trustForwardedIpHint:
-          'Enabled by default for upgrade compatibility. When enabled, raw CF-Connecting-IP, X-Real-IP, or X-Forwarded-For values take over server.trusted_proxies for client-IP resolution. Disable it to enforce the Gin trusted-proxy chain configured by server.trusted_proxies. Only enable takeover mode when the origin cannot be reached directly. Changing this switch changes existing session IP fingerprints.',
+          'Enable CF and custom client-IP headers from trusted proxies, or disable to use only the standard proxy chain. Both modes require server.trusted_proxies; without it, the connection peer IP is used. Proxies must overwrite spoofed client headers. Changes to IP resolution may require signing in again.',
         forwardedClientIpHeaders: 'Custom client-IP headers',
-        forwardedClientIpHeadersHint: 'Add CDN or proxy header names to check before the built-in headers.',
+        forwardedClientIpHeadersHint: 'When enabled above, these headers from trusted proxies precede built-in headers. Multiple IPs are resolved from the right of the proxy chain.',
         forwardedClientIpHeadersPlaceholder: 'X-Client-IP',
-        forwardedClientIpHeadersRiskHint: 'These raw headers can be spoofed when the origin is reachable directly. Restrict origin access before trusting them.',
+        forwardedClientIpHeadersRiskHint: 'Trust only the exact proxy IPs or ranges, never all sources. With CF, restrict origin access to CF and ensure proxies remove or overwrite CF headers on requests from other sources.',
         forwardedClientIpHeaderInvalid: 'Enter a valid HTTP header name.',
         forwardedClientIpHeadersLimit: 'At most {max} custom client-IP headers are allowed.',
         removeForwardedClientIpHeader: 'Remove {header}'

@@ -8,143 +8,128 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const forwardedIPSettingsKey = "sub2api.forwarded_ip_settings"
+const clientIPResolutionKey = "sub2api.client_ip_resolution"
+
+// ClientIPResolution 保存客户端 IP、连接对端和解析来源，不保存原始请求头。
+type ClientIPResolution struct {
+	ClientIP string
+	PeerIP   string
+	Source   string
+}
 
 type forwardedIPSettings struct {
 	trustForwarded bool
 	headers        []string
+	trustedProxies *CompiledIPRules
 }
 
 // SetForwardedIPSettings snapshots the forwarded-IP mode and custom header list
-// for this request.
-func SetForwardedIPSettings(c *gin.Context, enabled bool, headers []string) {
+// for this request. 转发头仅在对端匹配可信代理规则时生效；缺少规则时使用 Gin 的安全解析。
+// 同时固定解析结果，避免下游修改请求头导致日志与认证使用不同的 IP。
+func SetForwardedIPSettings(c *gin.Context, enabled bool, headers []string, trustedProxies ...*CompiledIPRules) {
 	if c == nil {
 		return
 	}
-	c.Set(forwardedIPSettingsKey, forwardedIPSettings{
+	settings := forwardedIPSettings{
 		trustForwarded: enabled,
 		headers:        append([]string(nil), headers...),
-	})
+	}
+	if len(trustedProxies) > 0 {
+		settings.trustedProxies = trustedProxies[0]
+	}
+	c.Set(clientIPResolutionKey, resolveClientIP(c, settings))
 }
 
-// SetLegacyForwardedIPTrust records whether raw forwarding headers override
-// Gin's server.trusted_proxies chain for this request.
+// SetLegacyForwardedIPTrust records the forwarded-header compatibility mode.
+// 保留旧调用接口，但不会跳过可信代理检查或直接信任原始转发头。
 func SetLegacyForwardedIPTrust(c *gin.Context, enabled bool) {
 	SetForwardedIPSettings(c, enabled, nil)
 }
 
-func requestForwardedIPSettings(c *gin.Context) (forwardedIPSettings, bool) {
-	if c == nil {
-		return forwardedIPSettings{}, false
-	}
-	value, ok := c.Get(forwardedIPSettingsKey)
-	if !ok {
-		return forwardedIPSettings{}, false
-	}
-	settings, ok := value.(forwardedIPSettings)
-	return settings, ok
-}
-
-func requestUsesLegacyForwardedIPTrust(c *gin.Context) bool {
-	settings, ok := requestForwardedIPSettings(c)
-	return !ok || settings.trustForwarded
-}
-
-// GetClientIP resolves the client address using the legacy forwarding-header
-// precedence used before the trusted-proxy hardening. It remains the
-// compatibility path for request metadata and usage/error logs; security-
-// sensitive callers must use GetTrustedClientIP or GetSecurityClientIP.
+// GetClientIP 返回经过可信代理检查的客户端 IP，与安全校验和请求日志共用请求快照。
 func GetClientIP(c *gin.Context) string {
+	return GetClientIPResolution(c).ClientIP
+}
+
+// GetClientIPResolution 返回当前请求固定的 IP 及来源；未注入时回退 Gin 的可信代理链。
+func GetClientIPResolution(c *gin.Context) ClientIPResolution {
 	if c == nil {
+		return ClientIPResolution{}
+	}
+	if value, ok := c.Get(clientIPResolutionKey); ok {
+		if resolution, ok := value.(ClientIPResolution); ok {
+			return resolution
+		}
+	}
+	return resolveClientIP(c, forwardedIPSettings{})
+}
+
+// resolveClientIP 先校验连接对端，再按配置选择可信转发头；私网地址也必须经过相同校验。
+func resolveClientIP(c *gin.Context, settings forwardedIPSettings) ClientIPResolution {
+	if c == nil || c.Request == nil {
+		return ClientIPResolution{}
+	}
+	peerIP := normalizeValidIP(c.Request.RemoteAddr)
+	result := ClientIPResolution{ClientIP: peerIP, PeerIP: peerIP, Source: "remote_addr"}
+	if peerIP == "" {
+		return result
+	}
+	if settings.trustedProxies == nil {
+		result.ClientIP = GetTrustedClientIP(c)
+		if result.ClientIP != peerIP {
+			result.Source = "trusted_proxy_chain"
+		}
+		return result
+	}
+	if !matchesCompiledRules(net.ParseIP(peerIP), settings.trustedProxies) {
+		return result
+	}
+
+	headers := []string{"X-Forwarded-For", "X-Real-IP"}
+	if settings.trustForwarded {
+		headers = append(append([]string(nil), settings.headers...), "CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For")
+	}
+	for _, header := range headers {
+		clientIP := resolveForwardedHeaderIP(c, header, settings.trustedProxies)
+		if clientIP != "" {
+			result.ClientIP = clientIP
+			result.Source = "header:" + strings.ToLower(header)
+			return result
+		}
+	}
+	return result
+}
+
+// resolveForwardedHeaderIP 验证完整 IP 链，从右侧剥离可信代理，停在第一个不可信地址。
+// CF-Connecting-IP 和 X-Real-IP 只能包含单个 IP，重复头、端口和非法值均不采用。
+func resolveForwardedHeaderIP(c *gin.Context, header string, trustedProxies *CompiledIPRules) string {
+	values := c.Request.Header.Values(header)
+	if len(values) == 0 {
 		return ""
 	}
-	if !requestUsesLegacyForwardedIPTrust(c) {
-		return GetTrustedClientIP(c)
+	if strings.EqualFold(header, "CF-Connecting-IP") || strings.EqualFold(header, "X-Real-IP") {
+		if len(values) != 1 {
+			return ""
+		}
+		if parsed := net.ParseIP(strings.TrimSpace(values[0])); parsed != nil {
+			return parsed.String()
+		}
+		return ""
 	}
-
-	settings, _ := requestForwardedIPSettings(c)
-	customIP, customFallback := resolveCustomForwardedClientIP(c, settings.headers)
-	if customIP != "" {
-		return customIP
-	}
-
-	// Preserve the historical precedence used by existing reverse-proxy
-	// deployments, while skipping an internal proxy address when a public XFF
-	// value is available. This covers Docker/Nginx setups that accidentally
-	// write the bridge address into X-Real-IP.
-	legacyIP, legacyFallback := resolveLegacyForwardedHeaderIP(c)
-	if legacyIP != "" {
-		return legacyIP
-	}
-	if customFallback != "" {
-		return customFallback
-	}
-	if legacyFallback != "" {
-		return legacyFallback
-	}
-	return normalizeIP(c.ClientIP())
-}
-
-func resolveCustomForwardedClientIP(c *gin.Context, headers []string) (string, string) {
-	if c == nil {
-		return "", ""
-	}
-	var fallback string
-	for _, header := range headers {
-		for _, value := range c.Request.Header.Values(header) {
-			for _, candidate := range strings.Split(value, ",") {
-				parsed := net.ParseIP(strings.TrimSpace(candidate))
-				if parsed == nil {
-					continue
-				}
-				normalized := parsed.String()
-				if isPrivateIP(normalized) {
-					if fallback == "" {
-						fallback = normalized
-					}
-					continue
-				}
-				return normalized, fallback
-			}
+	candidates := strings.Split(strings.Join(values, ","), ",")
+	parsed := make([]net.IP, len(candidates))
+	for i, candidate := range candidates {
+		parsed[i] = net.ParseIP(strings.TrimSpace(candidate))
+		if parsed[i] == nil {
+			return ""
 		}
 	}
-	return "", fallback
-}
-
-func resolveLegacyForwardedHeaderIP(c *gin.Context) (string, string) {
-	var fallback string
-	if forwarded := normalizeValidIP(c.GetHeader("CF-Connecting-IP")); forwarded != "" {
-		fallback = forwarded
-		if !isPrivateIP(forwarded) {
-			return forwarded, fallback
+	for i := len(parsed) - 1; i >= 0; i-- {
+		if i == 0 || !matchesCompiledRules(parsed[i], trustedProxies) {
+			return parsed[i].String()
 		}
 	}
-	if realIP := normalizeValidIP(c.GetHeader("X-Real-IP")); realIP != "" {
-		if fallback == "" {
-			fallback = realIP
-		}
-		if !isPrivateIP(realIP) {
-			return realIP, fallback
-		}
-	}
-	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		for _, candidate := range ips {
-			candidate = normalizeValidIP(candidate)
-			if candidate != "" && !isPrivateIP(candidate) {
-				return candidate, fallback
-			}
-		}
-		if fallback == "" {
-			for _, candidate := range ips {
-				if candidate = normalizeValidIP(candidate); candidate != "" {
-					fallback = candidate
-					break
-				}
-			}
-		}
-	}
-	return "", fallback
+	return ""
 }
 
 // GetTrustedClientIP 从 Gin 的可信代理解析链提取客户端 IP。
@@ -158,17 +143,10 @@ func GetTrustedClientIP(c *gin.Context) string {
 }
 
 // GetSecurityClientIP returns the address used by security-sensitive paths.
-// When legacy forwarded-IP trust is enabled, raw forwarding headers take over
-// client-IP resolution. When disabled, Gin's server.trusted_proxies chain is
-// authoritative.
-func GetSecurityClientIP(c *gin.Context, trustForwarded bool) string {
-	if requestSettings, ok := requestForwardedIPSettings(c); ok {
-		trustForwarded = requestSettings.trustForwarded
-	}
-	if trustForwarded {
-		return GetClientIP(c)
-	}
-	return GetTrustedClientIP(c)
+// 优先使用已校验可信代理的请求快照；缺少快照时安全回退 Gin 的可信代理链。
+// 保留旧开关参数以兼容现有调用，实际解析模式以请求入口的快照为准。
+func GetSecurityClientIP(c *gin.Context, _ bool) string {
+	return GetClientIP(c)
 }
 
 // normalizeIP 规范化 IP 地址，去除端口号和空格。
@@ -181,7 +159,7 @@ func normalizeIP(ip string) string {
 	return ip
 }
 
-// normalizeValidIP 规范化并验证代理头中的候选值，避免把 unknown、主机名等非法值传给安全服务。
+// normalizeValidIP 规范化并验证连接地址，避免把 unknown、主机名等非法值传给安全服务。
 func normalizeValidIP(value string) string {
 	normalized := normalizeIP(value)
 	parsed := net.ParseIP(normalized)
@@ -189,27 +167,6 @@ func normalizeValidIP(value string) string {
 		return ""
 	}
 	return parsed.String()
-}
-
-// privateNets contains the private/loopback ranges skipped while selecting a
-// public address from a legacy X-Forwarded-For chain.
-var privateNets []*net.IPNet
-
-func init() {
-	for _, cidr := range []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"::1/128",
-		"fc00::/7",
-	} {
-		_, block, err := net.ParseCIDR(cidr)
-		if err != nil {
-			panic("invalid CIDR: " + cidr)
-		}
-		privateNets = append(privateNets, block)
-	}
 }
 
 // CompiledIPRules 表示预编译的 IP 匹配规则。
@@ -261,19 +218,6 @@ func matchesCompiledRules(parsedIP net.IP, rules *CompiledIPRules) bool {
 	}
 	for _, ruleIP := range rules.IPs {
 		if parsedIP.Equal(ruleIP) {
-			return true
-		}
-	}
-	return false
-}
-
-func isPrivateIP(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	for _, block := range privateNets {
-		if block.Contains(ip) {
 			return true
 		}
 	}

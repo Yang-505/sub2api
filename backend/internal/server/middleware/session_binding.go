@@ -13,12 +13,21 @@ import (
 // SessionBindingContext 全局中间件：将请求的客户端 IP 与 User-Agent 注入
 // request context，供 token 签发路径（登录 / 刷新 / OAuth 回调）读取并写入会话绑定，
 // 同时作为审计日志、会话绑定校验的统一客户端 IP 来源。
-// IP 取值与 API Key IP 限制共用转发 IP 开关：开启时旧版原始转发头逻辑
-// 接管解析，关闭时使用 Gin 的 server.trusted_proxies 可信代理链。
+// IP 取值与 API Key IP 限制共用转发 IP 开关，两种模式都先验证 server.trusted_proxies。
+// 开启时支持自定义/CDN 请求头，关闭时仅使用标准代理链，不信任源站直连请求的转发头。
 func SessionBindingContext(cfg *config.Config) gin.HandlerFunc {
+	var proxyPatterns []string
+	if cfg != nil && cfg.Server.TrustedProxiesConfigured {
+		proxyPatterns = cfg.Server.TrustedProxies
+	}
+	trustedProxies := ip.CompileIPRules(proxyPatterns)
+	// 与 Gin 保持一致：只要列表含非法规则，就禁用整个代理策略，避免部分信任。
+	if len(ip.ValidateIPPatterns(proxyPatterns)) > 0 {
+		trustedProxies = ip.CompileIPRules(nil)
+	}
 	return func(c *gin.Context) {
 		forwardedIPSettings := cfg.ForwardedClientIPSettings()
-		ip.SetForwardedIPSettings(c, forwardedIPSettings.TrustForwardedIP, forwardedIPSettings.Headers)
+		ip.SetForwardedIPSettings(c, forwardedIPSettings.TrustForwardedIP, forwardedIPSettings.Headers, trustedProxies)
 		userAgent := normalizePersistentText(c.Request.UserAgent(), maxPersistentUserAgentBytes)
 		c.Request.Header.Set("User-Agent", userAgent)
 		binding := &service.SessionBinding{
@@ -81,6 +90,7 @@ func enforceSessionBinding(
 		_ = authService.RevokeSessionFamily(c.Request.Context(), claims.SessionID)
 	}
 	if auditService != nil {
+		resolution := ip.GetClientIPResolution(c)
 		uid := claims.UserID
 		path := c.FullPath()
 		if path == "" {
@@ -97,6 +107,10 @@ func enforceSessionBinding(
 			ClientIP:    binding.IP,
 			UserAgent:   normalizePersistentText(c.Request.UserAgent(), maxPersistentUserAgentBytes),
 			StatusCode:  401,
+			Extra: map[string]any{
+				"peer_ip":          resolution.PeerIP,
+				"client_ip_source": resolution.Source,
+			},
 		})
 	}
 	AbortWithError(c, 401, "SESSION_BINDING_MISMATCH", "Session network fingerprint changed, please login again")

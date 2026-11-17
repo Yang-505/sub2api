@@ -47,6 +47,105 @@ export interface AuditLogQuery {
 
 export type AuditLogListResponse = PaginatedResponse<AuditLog>
 
+export interface IPBlock {
+  id: number
+  client_ip: string
+  reason: string
+  source: 'automatic' | 'manual'
+  failure_count: number
+  strike_count: number
+  expires_at: string | null
+  revoked_at: string | null
+  active: boolean
+}
+
+export interface IPBlockList {
+  items: IPBlock[]
+  total: number
+  page: number
+  page_size: number
+  config: {
+    detection_enabled: boolean
+    enabled: boolean
+    short_threshold: number
+    short_window_seconds: number
+    long_threshold: number
+    long_window_seconds: number
+    initial_block_seconds: number
+    repeat_block_seconds: number
+    permanent_after: number
+  }
+}
+
+export interface IPAnomaly {
+  id: number
+  client_ip: string
+  reason: string
+  short_failures: number
+  long_failures: number
+  short_window_seconds: number
+  long_window_seconds: number
+  user_id: number | null
+  user_email: string
+  api_key_id: number | null
+  peer_ip: string
+  client_ip_source: string
+  method: string
+  route: string
+  first_detected_at: string
+  last_detected_at: string
+  dismissed_at: string | null
+  block_id: number | null
+  blocked: boolean
+}
+
+export interface IPAnomalyQuery {
+  page: number
+  status: 'pending' | 'dismissed' | 'blocked' | 'all'
+  client_ip?: string
+  user_id?: string
+}
+
+export interface IPAnomalyList {
+  items: IPAnomaly[]
+  total: number
+  page: number
+  page_size: number
+  config: IPBlockList['config']
+}
+
+/** 分页读取达到阈值的可疑来源，身份字段不包含攻击者填写的账号名。 */
+export async function listIPAnomalies(query: IPAnomalyQuery): Promise<IPAnomalyList> {
+  const { data } = await apiClient.get('/admin/audit-logs/ip-anomalies', { params: { ...query, page_size: 20 } })
+  return data
+}
+
+/** 忽略已有摘要并清空旧失败计数，后续新异常仍会重新检测。 */
+export async function dismissIPAnomaly(id: number): Promise<void> {
+  await apiClient.post(`/admin/audit-logs/ip-anomalies/${id}/dismiss`)
+}
+
+/** 分页读取 IP 封禁名单和当前防护配置。 */
+export async function listIPBlocks(page: number, activeOnly: boolean): Promise<IPBlockList> {
+  const { data } = await apiClient.get('/admin/audit-logs/ip-blocks', {
+    params: { page, page_size: 20, active_only: activeOnly }
+  })
+  return data
+}
+
+/** 保存临时或永久封禁；时长为零表示永久。 */
+export async function blockIP(clientIp: string, reason: string, durationSeconds: number): Promise<IPBlock> {
+  const { data } = await apiClient.post('/admin/audit-logs/ip-blocks', {
+    client_ip: clientIp, reason, duration_seconds: durationSeconds
+  })
+  return data
+}
+
+/** 解除封禁并清除该 IP 的旧失败窗口。 */
+export async function unblockIP(id: number): Promise<void> {
+  await apiClient.delete(`/admin/audit-logs/ip-blocks/${id}`)
+}
+
 /**
  * List audit logs (paginated, filterable).
  */
@@ -76,7 +175,12 @@ export async function clear(totpCode: string): Promise<{ deleted: number }> {
 export const auditAPI = {
   list,
   get,
-  clear
+  clear,
+  listIPBlocks,
+  blockIP,
+  unblockIP,
+  listIPAnomalies,
+  dismissIPAnomaly
 }
 
 export default auditAPI

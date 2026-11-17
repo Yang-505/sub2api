@@ -77,6 +77,12 @@
                 <Icon name="trash" size="sm" class="mr-1.5" />
                 {{ t('admin.audit.clearAll') }}
               </button>
+              <button type="button" class="btn btn-secondary" @click="openIPProtection('')">
+                {{ t('admin.audit.ipProtection.title') }}
+              </button>
+              <button type="button" class="btn btn-secondary" @click="openIPProtection('', 'anomalies')">
+                {{ t('admin.audit.ipAnomalies.title') }}
+              </button>
             </div>
           </div>
         </div>
@@ -134,6 +140,9 @@
             >
               <Icon name="eye" size="sm" />
               {{ t('admin.audit.columns.detail') }}
+            </button>
+            <button v-if="row.client_ip" type="button" class="ml-3 font-medium text-red-600 dark:text-red-400" @click="openIPProtection(row.client_ip)">
+              {{ t('admin.audit.ipProtection.block') }}
             </button>
           </template>
 
@@ -237,6 +246,14 @@
             </div>
             <div class="mt-1 break-all font-mono text-sm font-medium text-gray-900 dark:text-white">
               {{ detail.client_ip || '—' }}
+            </div>
+            <div v-if="detail.extra?.peer_ip" class="mt-1 break-all text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.audit.detail.peerIp') }}:
+              <span class="font-mono">{{ detail.extra.peer_ip }}</span>
+            </div>
+            <div v-if="detail.extra?.client_ip_source" class="mt-1 break-all text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.audit.detail.clientIpSource') }}:
+              <span class="font-mono">{{ detail.extra.client_ip_source }}</span>
             </div>
           </div>
         </div>
@@ -348,6 +365,7 @@
         </button>
       </template>
     </BaseDialog>
+    <IPBlockDialog :show="ipProtectionVisible" :initial-ip="selectedIP" :initial-tab="protectionTab" @close="ipProtectionVisible = false" @changed="fetchLogs" />
   </AppLayout>
 </template>
 
@@ -365,10 +383,21 @@ import Select from '@/components/common/Select.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
+import IPBlockDialog from '@/components/admin/IPBlockDialog.vue'
 import { useAppStore } from '@/stores'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const ipProtectionVisible = ref(false)
+const selectedIP = ref('')
+const protectionTab = ref<'blocks' | 'anomalies'>('blocks')
+
+// 将日志中的来源地址带入封禁表单，管理员仍可核对后提交。
+function openIPProtection(value: string, tab: 'blocks' | 'anomalies' = 'blocks') {
+  selectedIP.value = value
+  protectionTab.value = tab
+  ipProtectionVisible.value = true
+}
 
 const loading = ref(false)
 const logs = ref<AuditLog[]>([])

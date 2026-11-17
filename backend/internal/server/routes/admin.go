@@ -155,6 +155,11 @@ func registerAuditLogRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 	auditLogs := admin.Group("/audit-logs")
 	{
 		auditLogs.GET("", h.Admin.AuditLog.List)
+		auditLogs.GET("/ip-blocks", h.Admin.AuditLog.ListIPBlocks)
+		auditLogs.GET("/ip-anomalies", h.Admin.AuditLog.ListIPAnomalies)
+		auditLogs.POST("/ip-anomalies/:id/dismiss", h.Admin.AuditLog.DismissIPAnomaly)
+		auditLogs.POST("/ip-blocks", h.Admin.AuditLog.BlockIP)
+		auditLogs.DELETE("/ip-blocks/:id", h.Admin.AuditLog.UnblockIP)
 		auditLogs.GET("/:id", h.Admin.AuditLog.Get)
 		// 清空需现场 TOTP 校验（在 handler 内强制），不复用 step-up sudo 窗口
 		auditLogs.POST("/clear", h.Admin.AuditLog.Clear)

@@ -64,6 +64,8 @@ logs/
 tmp/
 temp/
 *.tmp
+# 本地数据副本和测试凭证不进入构建上下文。
+.dev/
 
 # Deploy files (not needed in image)
 deploy/install.sh

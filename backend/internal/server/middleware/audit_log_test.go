@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,55 @@ func TestDeriveAuditAction(t *testing.T) {
 		if got := deriveAuditAction(tc.method, tc.path); got != tc.want {
 			t.Fatalf("deriveAuditAction(%q, %q) = %q, want %q", tc.method, tc.path, got, tc.want)
 		}
+	}
+}
+
+// TestAuditLogRecordsTrustedIPSource 检查日志保留可信 IP 来源，且不受下游改头或附加信息覆盖影响。
+func TestAuditLogRecordsTrustedIPSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, trusted := range []bool{false, true} {
+		name := "untrusted peer"
+		if trusted {
+			name = "trusted peer"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.SetForwardedClientIPSettings(true, nil)
+			if trusted {
+				cfg.Server.TrustedProxiesConfigured = true
+				cfg.Server.TrustedProxies = []string{"10.0.0.2"}
+			}
+			repository := &auditCaptureRepository{}
+			auditService := service.NewAuditLogService(repository, nil)
+			auditService.Start()
+			t.Cleanup(auditService.Stop)
+			router := gin.New()
+			require.NoError(t, router.SetTrustedProxies(nil))
+			router.Use(SessionBindingContext(cfg), gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+			router.POST("/api/v1/auth/login", func(c *gin.Context) {
+				c.Request.Header.Set("CF-Connecting-IP", "8.8.8.8")
+				SetAuditExtra(c, map[string]any{"peer_ip": "8.8.8.8", "client_ip_source": "spoofed"})
+				c.Status(http.StatusUnauthorized)
+			})
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+			request.RemoteAddr = "10.0.0.2:443"
+			request.Header.Set("CF-Connecting-IP", "203.0.113.42")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			auditService.Stop()
+			require.Equal(t, http.StatusUnauthorized, recorder.Code)
+			repository.mu.Lock()
+			defer repository.mu.Unlock()
+			require.Len(t, repository.logs, 1)
+			entry := repository.logs[0]
+			wantIP, wantSource := "10.0.0.2", "remote_addr"
+			if trusted {
+				wantIP, wantSource = "203.0.113.42", "header:cf-connecting-ip"
+			}
+			require.Equal(t, wantIP, entry.ClientIP)
+			require.Equal(t, "10.0.0.2", entry.Extra["peer_ip"])
+			require.Equal(t, wantSource, entry.Extra["client_ip_source"])
+		})
 	}
 }
 

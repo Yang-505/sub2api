@@ -64,6 +64,7 @@ func jwtAuth(
 				AbortWithError(c, 401, "TOKEN_EXPIRED", "Token has expired")
 				return
 			}
+			MarkAuthFailure(c, "invalid_token")
 			AbortWithError(c, 401, "INVALID_TOKEN", "Invalid token")
 			return
 		}
@@ -81,6 +82,7 @@ func jwtAuth(
 
 		// 检查用户状态
 		if !user.IsActive() {
+			MarkAuthFailureForUser(c, "user_inactive", user.ID)
 			AbortWithError(c, 401, "USER_INACTIVE", "User account is not active")
 			return
 		}

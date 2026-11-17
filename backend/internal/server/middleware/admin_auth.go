@@ -143,6 +143,7 @@ func validateAdminAPIKey(
 
 	// 未配置或不匹配，统一返回相同错误（避免信息泄露）
 	if storedKey == "" || subtle.ConstantTimeCompare([]byte(key), []byte(storedKey)) != 1 {
+		MarkAuthFailure(c, "invalid_api_key")
 		AbortWithError(c, 401, "INVALID_ADMIN_KEY", "Invalid admin API key")
 		return false
 	}
@@ -180,6 +181,7 @@ func validateJWTForAdmin(
 			AbortWithError(c, 401, "TOKEN_EXPIRED", "Token has expired")
 			return false
 		}
+		MarkAuthFailure(c, "invalid_token")
 		AbortWithError(c, 401, "INVALID_TOKEN", "Invalid token")
 		return false
 	}
@@ -197,6 +199,7 @@ func validateJWTForAdmin(
 
 	// 检查用户状态
 	if !user.IsActive() {
+		MarkAuthFailureForUser(c, "user_inactive", user.ID)
 		AbortWithError(c, 401, "USER_INACTIVE", "User account is not active")
 		return false
 	}
@@ -240,11 +243,23 @@ func authenticateScopedAdminRequest(c *gin.Context, key string, settings *servic
 	item, err := settings.AuthenticateScopedAdminKey(c.Request.Context(), key, SecurityClientIP(c))
 	defer func() { recordAdminKeyRequest(c, audit, item) }()
 	if err != nil {
+		if !errors.Is(err, service.ErrScopedAdminKeyInvalid) {
+			AbortWithError(c, 500, "INTERNAL_ERROR", "Failed to validate admin API key")
+			return
+		}
+		if item != nil {
+			MarkAuthFailureForUser(c, "invalid_api_key", item.CreatedBy)
+		} else {
+			MarkAuthFailure(c, "invalid_api_key")
+		}
 		AbortWithError(c, 401, "INVALID_ADMIN_KEY", "Invalid admin API key")
 		return
 	}
 	user, err := users.GetByID(c.Request.Context(), item.CreatedBy)
 	if err != nil || user == nil || !user.IsActive() || !user.IsAdmin() {
+		if err == nil && user != nil && !user.IsActive() {
+			MarkAuthFailureForUser(c, "user_inactive", user.ID)
+		}
 		AbortWithError(c, 401, "INVALID_ADMIN_KEY", "Invalid admin API key")
 		return
 	}

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -117,6 +118,9 @@ func (h *AuthHandler) respondWithTokenPair(c *gin.Context, user *service.User) {
 
 func respondWithTokenPair(c *gin.Context, authService *service.AuthService, user *service.User) {
 	if err := ensureLoginUserActive(user); err != nil {
+		if errors.Is(err, service.ErrUserNotActive) {
+			middleware2.MarkAuthFailureForUser(c, "user_inactive", user.ID)
+		}
 		response.ErrorFrom(c, err)
 		return
 	}
@@ -239,6 +243,7 @@ func (h *AuthHandler) SendVerifyCode(c *gin.Context) {
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware2.MarkAuthFailure(c, "invalid_login_input")
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
@@ -251,6 +256,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	token, user, err := h.authService.Login(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidCredentials) {
+			middleware2.MarkAuthFailure(c, "invalid_credentials")
+		}
+		if errors.Is(err, service.ErrUserNotActive) {
+			middleware2.MarkAuthFailure(c, "user_inactive")
+		}
 		response.ErrorFrom(c, err)
 		return
 	}
@@ -301,6 +312,7 @@ type Login2FARequest struct {
 func (h *AuthHandler) Login2FA(c *gin.Context) {
 	var req Login2FARequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware2.MarkAuthFailure(c, "invalid_login_input")
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
@@ -312,12 +324,7 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 	// Get the login session
 	session, err := h.totpService.GetLoginSession(c.Request.Context(), req.TempToken)
 	if err != nil || session == nil {
-		tokenPrefix := ""
-		if len(req.TempToken) >= 8 {
-			tokenPrefix = req.TempToken[:8]
-		}
 		slog.Debug("login_2fa_session_invalid",
-			"temp_token_prefix", tokenPrefix,
 			"error", err)
 		response.BadRequest(c, "Invalid or expired 2FA session")
 		return
@@ -329,6 +336,11 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 
 	// Verify the TOTP code
 	if err := h.totpService.VerifyCode(c.Request.Context(), session.UserID, req.TotpCode); err != nil {
+		if errors.Is(err, service.ErrTotpInvalidCode) {
+			middleware2.MarkAuthFailureForUser(c, "invalid_second_factor", session.UserID)
+		} else if errors.Is(err, service.ErrTotpTooManyAttempts) {
+			middleware2.MarkAuthFailureForUser(c, "second_factor_rate_limited", session.UserID)
+		}
 		slog.Debug("login_2fa_verify_failed",
 			"user_id", session.UserID,
 			"error", err)
@@ -343,6 +355,9 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 		return
 	}
 	if err := ensureLoginUserActive(user); err != nil {
+		if errors.Is(err, service.ErrUserNotActive) {
+			middleware2.MarkAuthFailureForUser(c, "user_inactive", user.ID)
+		}
 		response.ErrorFrom(c, err)
 		return
 	}

@@ -126,24 +126,29 @@ benchmarks are not retained heap or RSS.
 ## Trusted client IPs
 
 `security.trust_forwarded_ip_for_api_key_acl` is enabled by default for upgrade
-compatibility. While enabled, raw forwarding headers take over client-IP
-resolution for logs and security-sensitive paths. Custom headers from
-`security.forwarded_client_ip_headers` are checked in configured order before
+compatibility. Both modes now require the connection peer to match
+`server.trusted_proxies` before any forwarding header is used. While enabled,
+custom headers from `security.forwarded_client_ip_headers` are checked in configured order before
 the built-in `CF-Connecting-IP`, `X-Real-IP`, and `X-Forwarded-For` fallback.
 Header names are case-insensitive, normalized when loaded, de-duplicated, and
 limited to 16 unique valid HTTP field names. Header values must contain IP
-literals; comma-separated values are supported, invalid entries are skipped,
-and public addresses are preferred over private fallback addresses.
+literals. `CF-Connecting-IP` and `X-Real-IP` require one IP literal and reject
+duplicates, lists and ports. Custom headers and `X-Forwarded-For` support
+comma-separated proxy chains: the entire chain must be valid, trusted hops are
+removed from the right, and resolution stops at the first untrusted address.
+Private addresses receive the same trust checks as public addresses.
 
 The list can be supplied in YAML or with the comma-separated environment
 variable `SECURITY_FORWARDED_CLIENT_IP_HEADERS`; an explicitly empty environment
 value clears YAML values. It is also editable from the admin security settings
 and updates at runtime without a restart. A request snapshots the switch and
-header list together, so one request cannot mix old and new settings. Custom
-headers are ignored completely when the switch is disabled. In that mode Gin's
-`server.trusted_proxies` chain is authoritative: configure only the exact
-CIDR/IP addresses that connect directly to Sub2API. An explicit empty list
-trusts no forwarded client IPs.
+header list together with the resolved address, so one request cannot mix
+old and new settings or change its IP by modifying headers downstream. Custom
+and CF headers are ignored when the switch is disabled, using standard
+`X-Forwarded-For` / `X-Real-IP` precedence instead. Configure only the exact
+CIDR/IP addresses of proxies in your chain; an omitted or empty list ignores all
+forwarding headers in both modes. Access logs and new audit records include
+`peer_ip` and `client_ip_source`; existing audit records remain unchanged.
 
 On the first upgrade to this mode, a legacy `false` value is changed to `true`
 only when `server.trusted_proxies` was not explicitly configured; explicit
@@ -156,11 +161,14 @@ the process fails closed to trusted-proxy mode with no custom headers. If a
 migration write fails, the computed mode remains active for the current process
 and startup records a warning.
 
-Compatibility takeover accepts forwarded headers without validating the direct
-peer, including any configured custom header. Protect the origin from direct
-access while it is enabled. A CDN deployment must firewall the origin so only
-the CDN or load balancer can reach it, and that proxy must overwrite every
-trusted client-IP header rather than append an untrusted client value.
+Never configure `0.0.0.0/0` or `::/0` as trusted proxies. A trusted reverse proxy
+must overwrite client-IP headers using a verified source. In a CF → Nginx/Caddy
+→ Sub2API deployment, trusting Nginx/Caddy alone does not prove that a request
+passed through CF: restrict origin access to CF and remove or overwrite CF
+headers on requests from other sources. List the actual direct proxy address
+seen by Sub2API, including Docker networking when applicable, rather than
+assuming it is loopback. An application IP check does not replace the origin
+firewall policy.
 
 Example for a proxy on the same host:
 
@@ -170,6 +178,66 @@ server:
     - 127.0.0.1/32
     - ::1/128
 ```
+
+## Persistent authentication-abuse protection
+
+Migration `252_auth_ip_blocks.sql` adds an independent IP block table. It does
+not reset users, passwords, balances, groups, API keys, or usage records. Apply
+it through the normal application migration process before using this feature.
+
+Manual IP blocks are always enforced at business entrances, including login
+and gateway aliases. Administrators can create temporary or permanent blocks
+and revoke them from **Audit Logs → IP Blocks**. Records retain the latest
+reason and automatic strike count; the audit log records each successful change.
+Revoking a block clears its Redis failure window, while retaining its database
+record and escalation history. A successful login does not reset failure counts.
+
+Automatic anomaly detection defaults to enabled through
+`security.auth_abuse.detection_enabled`; automatic blocking remains disabled.
+Migration `253_auth_ip_anomalies.sql` adds a separate, per-IP detection summary.
+The **Audit Logs → Anomalies / Suspicious IPs** list shows pending, dismissed,
+and currently blocked sources, safe IP provenance, and the last identified
+user/key IDs. Submitted login account names are not trusted identities. Reviewers
+can filter by IP or identified user ID and use the existing block confirmation.
+Dismissal preserves the summary but clears the old rolling failure counters;
+new failures reaching the threshold create a new alert. An older concurrent
+detection cannot reopen an alert dismissed after that detection occurred.
+Database summaries update at most once per minute per IP; the visible list
+refreshes every 15 seconds. Counts are lower bounds of retained window samples,
+not exact lifetime counts. Blocking does not remove the detection summary, and
+attempts from an already blocked IP can also produce an anomaly without
+automatically increasing its punishment. Disabling detection does not disable
+manual blocks or independently enabled automatic blocking.
+
+Verify the client IP and proxy chain before enabling automatic blocking with
+`security.auth_abuse.enabled: true` or `SECURITY_AUTH_ABUSE_ENABLED=true`.
+The default anomaly thresholds are 10 failures in 15 minutes or 30 failures in
+a rolling 24 hours. When automatic blocking is enabled, initial blocks last 30
+minutes, and repeat blocks last 24 hours. `permanent_after: 0` disables automatic
+permanent blocks; `3` makes the third automatic trigger permanent. Manual
+permanent blocks remain available regardless of that setting.
+
+Failures accumulate across accounts and keys on the same IP, including invalid
+login fields, incorrect credentials or OTP codes, invalid login tokens,
+disabled users, and invalid or disabled API keys (including scoped admin keys).
+Continued attempts after OTP lockout or invalid-auth rate limiting also count.
+Scoped admin key storage failures remain server errors and do not count as
+credential guessing. Ordinary token expiry, quota/concurrency limits, and
+upstream failures are excluded. Redis shares rolling counters between instances;
+PostgreSQL preserves the block and strike count across application restarts.
+All instances must share these stores and use the same protection configuration.
+Configure `security.auth_abuse.whitelist` only with explicitly trusted
+administrator IPs/CIDRs; these addresses bypass both automatic and manual blocks.
+Do not whitelist every CDN/proxy address or trust unverified forwarding headers.
+
+An active block returns 403 before authentication or upstream forwarding.
+Checks return 503 when protection dependencies are unavailable, including
+while a failed block update's short lease expires. Mutation errors explicitly
+report when database changes have already been saved but Redis synchronization
+failed. Existing WebSocket sessions recheck the IP and current key/user status
+before subsequent turns. A turn or HTTP stream already in progress is not
+forcibly terminated. Network-level isolation and protection against distributed
+sources still require origin and edge controls.
 
 ## Nginx baseline
 

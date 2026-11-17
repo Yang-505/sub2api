@@ -12,6 +12,7 @@ import (
 )
 
 var ingressRejectReasons = map[string]struct{}{
+	"client_ip_blocked": {}, "ip_protection_unavailable": {},
 	"query_api_key_deprecated": {}, "api_key_required": {}, "invalid_api_key": {},
 	"invalid_auth_rate_limited": {},
 	"api_key_auth_overloaded":   {},

@@ -43,8 +43,10 @@ func TestScopedAdminKeySecret(t *testing.T) {
 }
 
 type scopedKeyMemoryRepo struct {
-	item    *ScopedAdminKey
-	deleted bool
+	item     *ScopedAdminKey
+	deleted  bool
+	readErr  error
+	touchErr error
 }
 
 func (r *scopedKeyMemoryRepo) ListScopedAdminKeys(context.Context) ([]*ScopedAdminKey, error) {
@@ -54,6 +56,9 @@ func (r *scopedKeyMemoryRepo) ListScopedAdminKeys(context.Context) ([]*ScopedAdm
 	return []*ScopedAdminKey{r.item}, nil
 }
 func (r *scopedKeyMemoryRepo) GetScopedAdminKey(_ context.Context, id string) (*ScopedAdminKey, error) {
+	if r.readErr != nil {
+		return nil, r.readErr
+	}
 	if r.item == nil || r.item.ID != id {
 		return nil, ErrScopedAdminKeyNotFound
 	}
@@ -71,7 +76,31 @@ func (r *scopedKeyMemoryRepo) UpdateScopedAdminKey(_ context.Context, k *ScopedA
 	return nil
 }
 func (r *scopedKeyMemoryRepo) TouchScopedAdminKey(context.Context, string, string, time.Time, string, time.Time) error {
-	return nil
+	return r.touchErr
+}
+
+// TestScopedAdminKeyStorageFailureIsNotInvalidCredential 防止数据库故障被归类为认证试错。
+func TestScopedAdminKeyStorageFailureIsNotInvalidCredential(t *testing.T) {
+	failure := errors.New("database unavailable")
+	for _, stage := range []string{"read", "touch"} {
+		t.Run(stage, func(t *testing.T) {
+			repo := &scopedKeyMemoryRepo{}
+			settings := &SettingService{scopedAdminKeyRepo: repo}
+			key, _, err := settings.CreateScopedAdminKey(context.Background(), ScopedAdminKeyInput{Name: "故障分类", Enabled: true}, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage == "read" {
+				repo.readErr = failure
+			} else {
+				repo.touchErr = failure
+			}
+			_, err = settings.AuthenticateScopedAdminKey(context.Background(), key, "192.0.2.1")
+			if !errors.Is(err, failure) || errors.Is(err, ErrScopedAdminKeyInvalid) || infraerrors.Code(err) != 500 {
+				t.Fatalf("存储故障应保留原因并返回服务错误，实际 %v", err)
+			}
+		})
+	}
 }
 func (r *scopedKeyMemoryRepo) RevokeScopedAdminKey(_ context.Context, _ string, at time.Time) error {
 	r.item.RevokedAt = &at

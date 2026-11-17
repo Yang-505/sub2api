@@ -20,6 +20,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -3111,6 +3112,32 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return mapping.MappedModel, nil
 			},
 			BeforeTurn: func(turn int) error {
+				if err := middleware2.CheckAuthIP(c); err != nil {
+					var appErr *infraerrors.ApplicationError
+					if errors.As(err, &appErr) && appErr.Reason == "IP_BLOCKED" {
+						return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "IP is blocked; please contact the administrator", err)
+					}
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "IP protection temporarily unavailable; retry later", err)
+				}
+				// 已建立的连接在每个新轮次读取当前 Key/用户状态，停用后不能沿用建连快照。
+				if turn > 1 && h.apiKeyService != nil {
+					latest, err := h.apiKeyService.GetByID(ctx, apiKey.ID)
+					if err != nil {
+						if errors.Is(err, service.ErrAPIKeyNotFound) {
+							middleware2.MarkAuthFailure(c, "invalid_api_key")
+							return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "API key is no longer available", err)
+						}
+						return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "Authentication temporarily unavailable; retry later", err)
+					}
+					if latest == nil || (!latest.IsActive() && latest.Status != service.StatusAPIKeyExpired && latest.Status != service.StatusAPIKeyQuotaExhausted) {
+						middleware2.MarkAuthFailure(c, "api_key_disabled")
+						return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "API key is disabled", nil)
+					}
+					if latest.User == nil || !latest.User.IsActive() {
+						middleware2.MarkAuthFailure(c, "user_inactive")
+						return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "User account is not active", nil)
+					}
+				}
 				// turn==1 的会话屏蔽已由握手层检查覆盖；连接内 flag 只拦截后续 turn。
 				if cyberBlockedThisConn && !h.cyberPolicyLogOnly(c, apiKey) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)

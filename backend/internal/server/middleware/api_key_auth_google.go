@@ -88,6 +88,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			apiKey.Status != service.StatusAPIKeyExpired &&
 			apiKey.Status != service.StatusAPIKeyQuotaExhausted {
 			MarkIngressRejected(c, IngressRejectAPIKeyDisabled)
+			recordInvalidAuthFailure(c, apiKeyService)
 			abortWithGoogleError(c, 401, "API key is disabled")
 			return
 		}
@@ -112,6 +113,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			return
 		}
 		if !apiKey.User.IsActive() {
+			recordInvalidAuthFailure(c, apiKeyService)
 			MarkIngressRejected(c, IngressRejectUserInactive)
 			abortWithGoogleError(c, 401, "User account is not active")
 			return

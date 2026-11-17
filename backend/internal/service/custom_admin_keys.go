@@ -235,6 +235,7 @@ func (s *SettingService) DeleteScopedAdminKeyRecord(ctx context.Context, id stri
 	return r.DeleteScopedAdminKeyRecord(ctx, id, time.Now().UTC())
 }
 
+// AuthenticateScopedAdminKey 验证管理密钥，并区分凭证失败与存储故障，避免误计异常试错。
 func (s *SettingService) AuthenticateScopedAdminKey(ctx context.Context, key, ip string) (*ScopedAdminKey, error) {
 	parts := strings.Split(key, "_")
 	if len(parts) != 4 || parts[0] != "adm" || parts[1] != "sc" || len(parts[2]) != 24 || len(parts[3]) != 64 {
@@ -246,7 +247,10 @@ func (s *SettingService) AuthenticateScopedAdminKey(ctx context.Context, key, ip
 	}
 	item, e := r.GetScopedAdminKey(ctx, parts[2])
 	if e != nil {
-		return nil, ErrScopedAdminKeyInvalid
+		if errors.Is(e, ErrScopedAdminKeyNotFound) {
+			return nil, ErrScopedAdminKeyInvalid
+		}
+		return nil, infraerrors.InternalServer("ADMIN_KEY_AUTH_UNAVAILABLE", "Failed to validate admin API key").WithCause(e)
 	}
 	if !verifyScopedAdminKey(key, item.Hash) {
 		return nil, ErrScopedAdminKeyInvalid
@@ -255,7 +259,10 @@ func (s *SettingService) AuthenticateScopedAdminKey(ctx context.Context, key, ip
 		return item, ErrScopedAdminKeyInvalid
 	}
 	if e = r.TouchScopedAdminKey(ctx, item.ID, item.Hash, item.UpdatedAt, ip, time.Now().UTC()); e != nil {
-		return nil, ErrScopedAdminKeyInvalid
+		if errors.Is(e, ErrScopedAdminKeyNotFound) || errors.Is(e, ErrScopedAdminKeyConflict) {
+			return nil, ErrScopedAdminKeyInvalid
+		}
+		return nil, infraerrors.InternalServer("ADMIN_KEY_AUTH_UNAVAILABLE", "Failed to validate admin API key").WithCause(e)
 	}
 	return item, nil
 }

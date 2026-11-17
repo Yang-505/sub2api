@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -52,6 +53,7 @@ func SkipAudit(c *gin.Context) {
 // scalar, non-secret operation summaries. Request bodies and arbitrary maps
 // are never accepted through this channel.
 var auditExtraAllowedKeys = map[string]struct{}{
+	"target_ip": {}, "block_id": {}, "expires_at": {}, "anomaly_id": {},
 	"admin_key_id": {}, "full_access": {}, "full_access_before": {},
 	"mcp_grant_id": {}, "mcp_tool": {},
 	"result": {}, "error_code": {}, "enabled": {}, "blocking_enabled": {},
@@ -124,6 +126,9 @@ var auditSensitiveReads = map[string]string{
 
 // auditActionOverrides 变更类请求的动作名精确映射（未命中时自动推导）。
 var auditActionOverrides = map[string]string{
+	"POST /api/v1/admin/audit-logs/ip-anomalies/:id/dismiss":  "security.ip.dismiss_anomaly",
+	"POST /api/v1/admin/audit-logs/ip-blocks":                 "security.ip.manual_block",
+	"DELETE /api/v1/admin/audit-logs/ip-blocks/:id":           "security.ip.unblock",
 	"POST /api/v1/auth/login":                                 service.AuditActionLogin,
 	"POST /api/v1/auth/login/2fa":                             service.AuditActionLogin2FA,
 	"POST /api/v1/auth/passkey/login/finish":                  service.AuditActionLogin,
@@ -294,6 +299,10 @@ func NewAuditLogMiddleware(auditService *service.AuditLogService) AuditLogMiddle
 		if q := service.RedactAuditQuery(c.Request.URL.RawQuery); q != "" {
 			extra["query"] = q
 		}
+		// 保存可信解析来源用于排查 CF/源站绕过，不记录原始转发头内容。
+		resolution := ip.GetClientIPResolution(c)
+		extra["peer_ip"] = resolution.PeerIP
+		extra["client_ip_source"] = resolution.Source
 		if len(extra) > 0 {
 			entry.Extra = extra
 		}
